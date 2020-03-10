@@ -2,7 +2,8 @@ garbled neural net experiments
 ==============================
 This repo contains an implementation of convolutional neural networks using arithmetic
 garbled circuits, via [fancy-garbling](https://github.com/GaloisInc/swanky/fancy-garbling). 
-It contains the models we ran our experiments on in the paper.
+It contains the models we ran our experiments on in our paper, [Garbled Neural Networks
+Are Practical](https://eprint.iacr.org/2019/338).
 
 The high-level idea is that we use JSON output of `tensorflow` models to build neural
 network layers as a garbled circuit. The `Garbler` either hard codes the weights and
