@@ -24,7 +24,11 @@ evaluate the neural network on all the test data and return the maximum bitwith 
 for each layer. You can then use this information to customize the bitwith for each layer
 when using other commands (using the `-w` argument).
 
+If you aren't familiar with rust, the getting started page is
+[here](https://www.rust-lang.org/learn/get-started).
+
 Note: this project uses nightly `rustc` due to use of atomic operations.
+We recommend using [rustup](https://rustup.rs/) to configure nightly rust.
 
 usage
 -----
