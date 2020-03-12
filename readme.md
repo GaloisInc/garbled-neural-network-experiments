@@ -27,8 +27,11 @@ when using other commands (using the `-w` argument).
 If you aren't familiar with rust, the getting started page is
 [here](https://www.rust-lang.org/learn/get-started).
 
-Note: this project uses nightly `rustc` due to use of atomic operations.
+*Note on requirements*: 
+This project uses nightly `rustc` due to use of atomic operations.
 We recommend using [rustup](https://rustup.rs/) to configure nightly rust.
+Fancy Garbling also requires AESNI, so requires a processor that supports that
+instruction.
 
 usage
 -----
