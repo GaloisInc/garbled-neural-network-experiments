@@ -1,9 +1,11 @@
 use colored::*;
+use fancy_garbling::FancyInput;
 use fancy_garbling::dummy::Dummy;
 use fancy_garbling::util as numbers;
-use fancy_garbling::FancyInput;
 use itertools::Itertools;
 use ndarray::Array3;
+use std::time::Duration;
+use std::time::Instant;
 use swanky_channel::Channel;
 
 use crate::layer::Accuracy;
@@ -31,25 +33,19 @@ pub fn arith_accuracy_test(
 
     let mut errors = 0;
 
-    let mb = pbr::MultiBar::new();
-    let mut p1 = mb.create_bar(images.len() as u64);
-    p1.message("Test ");
-    let mut p2 = mb.create_bar(nn.nlayers() as u64);
-    std::thread::spawn(move || mb.listen());
-    let mut total_time = time::Duration::zero();
+    let mut total_time = Instant::now();
 
     for (img_num, img) in images.iter().enumerate() {
-        p1.inc();
-        p1.message(&format!(
-            "(avg {}ms) [{} errors ({:.2}%)] ",
+        println!(
+            "(avg {:?}) [{} errors ({:.2}%)] ",
             if img_num > 0 {
-                total_time.num_milliseconds() / img_num as i64
+                total_time.elapsed() / img_num as u32
             } else {
-                0
+                Duration::ZERO
             },
             errors,
             100.0 * (1.0 - errors as f32 / img_num as f32)
-        ));
+        );
 
         let (start, outs) = Channel::with(std::io::empty(), |channel| {
             // create a new dummy with the image as the input
@@ -64,12 +60,11 @@ pub fn arith_accuracy_test(
                 .collect_vec();
 
             // evaluate the fancy computation using the dummy
-            let start = time::PreciseTime::now();
+            let start = Instant::now();
             let outs = nn.eval_arith(
                 &mut dummy,
                 &inp,
                 &moduli,
-                Some(&mut p2),
                 8,
                 secret_weights,
                 true,
@@ -79,8 +74,7 @@ pub fn arith_accuracy_test(
             Ok((start, outs))
         })
         .unwrap();
-        let end = time::PreciseTime::now();
-        total_time = total_time + start.to(end);
+        total_time += start.elapsed();
 
         // decode the output back to i64
         let res = outs
@@ -95,9 +89,6 @@ pub fn arith_accuracy_test(
             errors += 1;
         }
     }
-
-    p1.finish();
-    p2.finish();
 
     println!(
         "errors: {}/{}. accuracy: {:.2}%",
@@ -124,25 +115,19 @@ pub fn boolean_accuracy_test(
 
     let first_layer_nbits = *bitwidth.first().unwrap();
 
-    let mb = pbr::MultiBar::new();
-    let mut p1 = mb.create_bar(images.len() as u64);
-    p1.message("Test ");
-    let mut p2 = mb.create_bar(nn.nlayers() as u64);
-    std::thread::spawn(move || mb.listen());
-    let mut total_time = time::Duration::zero();
+    let mut total_time = Instant::now();
 
     for (img_num, img) in images.iter().enumerate() {
-        p1.inc();
-        p1.message(&format!(
-            "(avg {} ms) [{} errors ({:.2}%)] ",
+        println!(
+            "(avg {:?}) [{} errors ({:.2}%)] ",
             if img_num > 0 {
-                total_time.num_milliseconds() / img_num as i64
+                total_time.elapsed() / img_num as u32
             } else {
-                0
+                Duration::ZERO
             },
             errors,
             100.0 * (1.0 - errors as f32 / img_num as f32)
-        ));
+        );
 
         let (start, outs) = Channel::with(std::io::empty(), |channel| {
             // create a new dummy with the image as the input
@@ -158,22 +143,13 @@ pub fn boolean_accuracy_test(
                 .collect_vec();
 
             // evaluate the fancy computation using the dummy
-            let start = time::PreciseTime::now();
-            let outs = nn.eval_boolean(
-                &mut dummy,
-                &inp,
-                bitwidth,
-                Some(&mut p2),
-                8,
-                secret_weights,
-                true,
-                channel,
-            );
+            let start = Instant::now();
+            let outs =
+                nn.eval_boolean(&mut dummy, &inp, bitwidth, 8, secret_weights, true, channel);
             Ok((start, outs))
         })
         .unwrap();
-        let end = time::PreciseTime::now();
-        total_time = total_time + start.to(end);
+        total_time += start.elapsed();
 
         // decode the output back to i64
         let res = outs
@@ -188,9 +164,6 @@ pub fn boolean_accuracy_test(
             errors += 1;
         }
     }
-
-    p1.finish();
-    p2.finish();
 
     println!(
         "errors: {}/{}. accuracy: {:.2}%",

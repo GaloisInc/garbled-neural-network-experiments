@@ -148,15 +148,15 @@ pub fn decode_binary(output: &[u16], nbits: usize) -> Vec<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{thread_rng, Rng};
+    use rand::{Rng, thread_rng};
 
     #[test]
     fn convert_crt() {
         let mut rng = thread_rng();
         for _ in 0..1024 {
-            let nprimes = 2_usize + (rng.gen::<usize>() % 16);
+            let nprimes = 2_usize + (rng.r#gen::<usize>() % 16);
             let q = numbers::modulus_with_nprimes(nprimes);
-            let x = rng.gen::<i64>() % (q / 2) as i64;
+            let x = rng.r#gen::<i64>() % (q / 2) as i64;
             assert_eq!(x, from_mod_q_crt(&to_mod_q_crt(x, q), q));
         }
     }
@@ -164,9 +164,9 @@ mod tests {
     #[test]
     fn convert_binary() {
         let mut rng = thread_rng();
-        let nbits = 2 + rng.gen::<usize>() % 120;
+        let nbits = 2 + rng.r#gen::<usize>() % 120;
         for _ in 0..128 {
-            let x = rng.gen::<i64>() % nbits as i64;
+            let x = rng.r#gen::<i64>() % nbits as i64;
             assert_eq!(
                 x,
                 i64_from_twos_complement(i64_to_twos_complement(x, nbits), nbits)
@@ -178,7 +178,7 @@ mod tests {
     fn binary_encoding() {
         let mut rng = thread_rng();
         let nbits = 64;
-        let x = rng.gen::<i64>() % (1 << 32);
+        let x = rng.r#gen::<i64>() % (1 << 32);
         let bits = i64_to_bits(x, nbits);
         let y = i64_from_bits(&bits);
         assert_eq!(x, y);

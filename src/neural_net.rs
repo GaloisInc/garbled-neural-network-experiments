@@ -4,9 +4,7 @@ use fancy_garbling::{
     BinaryBundle, CrtBundle, CrtGadgets, Fancy, FancyArithmetic, FancyBinary, FancyInput,
     HasModulus,
 };
-use itertools::Itertools;
 use ndarray::Array3;
-use pbr::ProgressBar;
 use serde_json::{self, Value};
 use std::fs::File;
 use swanky_channel::Channel;
@@ -17,21 +15,23 @@ pub struct NeuralNet {
     layers: Vec<Layer>,
 }
 
+impl std::fmt::Display for NeuralNet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", "neural net info:\n".yellow())?;
+        writeln!(f, "  input dimensions: {:?}", self.layers[0].input_dims())?;
+        for layer in self.layers.iter() {
+            writeln!(f, "  {:?}", layer)?;
+            writeln!(f, "    inp={:?}", layer.input_dims())?;
+            writeln!(f, "    out={:?}", layer.output_dims())?;
+        }
+        Ok(())
+    }
+}
+
 impl NeuralNet {
     /// Get the number of inputs to the first layer.
     pub fn num_inputs(&self) -> usize {
         self.layers[0].input_size()
-    }
-
-    /// Print info about the neural network.
-    pub fn print_info(&self) {
-        println!("{}", "neural net info:".yellow());
-        println!("  input dimensions: {:?}", self.layers[0].input_dims());
-        for layer in self.layers.iter() {
-            println!("  {}", layer.info());
-            println!("    inp={:?}", layer.input_dims());
-            println!("    out={:?}", layer.output_dims());
-        }
     }
 
     pub fn nlayers(&self) -> usize {
@@ -40,12 +40,11 @@ impl NeuralNet {
 
     /// Convert the neural network into an arithmetic fancy computation.
     #[allow(clippy::too_many_arguments)]
-    pub fn eval_arith<W, F, T>(
+    pub fn eval_arith<W, F>(
         &self,
         b: &mut F,
         circuit_inputs: &[CrtBundle<W>],
         moduli: &[u128], // CRT moduli for each layer's operations
-        mut pb: Option<&mut ProgressBar<T>>,
         max_threads: usize,
         secret_weights: bool,
         secret_weights_owned: bool,
@@ -58,7 +57,6 @@ impl NeuralNet {
             + FancyInput<Item = W>
             + FancyArithmetic<Item = W>
             + CrtGadgets<Item = W>,
-        T: std::io::Write,
     {
         assert_eq!(
             moduli.len(),
@@ -66,20 +64,11 @@ impl NeuralNet {
             "moduli for each layer and output required"
         );
 
-        // set the progress bar to 0
-        pb.as_mut().map(|pb| pb.set(0));
-
         // each layers input/output
         let mut acc =
             Array3::from_shape_vec(self.layers[0].input_dims(), circuit_inputs.to_vec()).unwrap();
 
         for (i, layer) in self.layers.iter().enumerate() {
-            // update the progress bar
-            if let Some(pb) = pb.as_mut() {
-                pb.message(&format!("Layer [{}] ", layer.name()));
-                pb.inc();
-            }
-
             // evaluate this layer as fancy
             let inp_mod = moduli[i];
             let out_mod = moduli[i + 1];
@@ -96,17 +85,16 @@ impl NeuralNet {
             );
         }
 
-        acc.into_iter().cloned().collect_vec()
+        acc.into_iter().cloned().collect()
     }
 
     /// Evaluate the neural network as boolean fancy computation.
     #[allow(clippy::too_many_arguments)]
-    pub fn eval_boolean<W, F, T>(
+    pub fn eval_boolean<W, F>(
         &self,
         b: &mut F,
         circuit_inputs: &[BinaryBundle<W>],
         bitwidth: &[usize],
-        mut pb: Option<&mut ProgressBar<T>>,
         max_threads: usize,
         secret_weights: bool,
         secret_weights_owned: bool,
@@ -115,16 +103,11 @@ impl NeuralNet {
     where
         W: Clone + HasModulus,
         F: Fancy<Item = W> + FancyInput<Item = W> + FancyBinary<Item = W>,
-        T: std::io::Write,
     {
         let mut acc =
             Array3::from_shape_vec(self.layers[0].input_dims(), circuit_inputs.to_vec()).unwrap();
-        pb.as_mut().map(|pb| pb.set(0));
+
         for (i, layer) in self.layers.iter().enumerate() {
-            if let Some(pb) = pb.as_mut() {
-                pb.message(&format!("Layer [{}] ", layer.name()));
-                pb.inc();
-            }
             acc = layer.as_binary(
                 b,
                 bitwidth[i],
@@ -136,20 +119,18 @@ impl NeuralNet {
                 channel,
             );
         }
-        acc.iter().cloned().collect_vec()
+        acc.iter().cloned().collect()
     }
 
     /// Find max/min number of bits necessary for a value on any wire in the neural network by layer.
     pub fn max_bitwidth(&self, inputs: &[Array3<i64>], channel: &mut Channel) -> Vec<f64> {
-        let mut pb = pbr::ProgressBar::new(inputs.len() as u64);
         let mut max_nbits: Vec<f64> = vec![0.0; self.layers.len()];
 
         for input in inputs.iter() {
-            pb.message(&format!(
+            println!(
                 "Computing bitwidth: [{}] ",
                 itertools::join(max_nbits.iter().map(|nbits| format!("{:.0}", nbits)), ", ")
-            ));
-            pb.inc();
+            );
 
             let mut input = input.clone();
             for (j, layer) in self.layers.iter().enumerate() {
@@ -169,7 +150,6 @@ impl NeuralNet {
             }
         }
 
-        pb.finish();
         max_nbits
     }
 
@@ -250,7 +230,7 @@ impl NeuralNet {
                         .unwrap()
                         .iter()
                         .map(|n| Some(n.as_i64().unwrap()))
-                        .collect_vec();
+                        .collect::<Vec<_>>();
                     layers.push(Layer::Dense {
                         weights,
                         biases,
@@ -273,7 +253,7 @@ impl NeuralNet {
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize)
-                        .collect_vec();
+                        .collect::<Vec<_>>();
                     let kernel_shape = (kernel_size[0], kernel_size[1], input_shape.2);
 
                     let stride = cfg["strides"]
@@ -281,7 +261,7 @@ impl NeuralNet {
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize)
-                        .collect_vec();
+                        .collect::<Vec<_>>();
                     let stride = (stride[0], stride[1]);
 
                     let weights = weights_and_biases[0]
@@ -308,13 +288,13 @@ impl NeuralNet {
                                                         )
                                                     })
                                                 })
-                                                .collect_vec()
+                                                .collect::<Vec<_>>()
                                         })
-                                        .collect_vec()
+                                        .collect::<Vec<_>>()
                                 })
-                                .collect_vec()
+                                .collect::<Vec<_>>()
                         })
-                        .collect_vec();
+                        .collect::<Vec<_>>();
 
                     let nfilters = cfg["filters"].as_u64().unwrap() as usize;
                     let mut filters = vec![Array3::from_elem(kernel_shape, Some(0)); nfilters];
@@ -342,7 +322,7 @@ impl NeuralNet {
                         .unwrap()
                         .iter()
                         .map(|n| Some(n.as_i64().unwrap()))
-                        .collect_vec();
+                        .collect::<Vec<_>>();
 
                     assert_eq!(biases.len(), nfilters);
 
@@ -367,7 +347,7 @@ impl NeuralNet {
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize)
-                        .collect_vec();
+                        .collect::<Vec<_>>();
                     let stride = (stride[0], stride[1]);
 
                     let size = cfg["pool_size"]
@@ -375,7 +355,7 @@ impl NeuralNet {
                         .unwrap()
                         .iter()
                         .map(|v| v.as_i64().unwrap() as usize)
-                        .collect_vec();
+                        .collect::<Vec<_>>();
                     let size = (size[0], size[1]);
 
                     layers.push(Layer::MaxPooling2D {

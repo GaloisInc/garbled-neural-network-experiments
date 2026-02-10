@@ -6,14 +6,14 @@
 //! minimizing NN evaluation bugs.
 
 use crate::util;
-use fancy_garbling::{util as numbers, FancyArithmetic};
 use fancy_garbling::{
     BinaryBundle, BinaryGadgets, CrtBundle, CrtGadgets, Fancy, FancyInput, HasModulus,
 };
-use itertools::{iproduct, Itertools};
+use fancy_garbling::{FancyArithmetic, util as numbers};
+use itertools::iproduct;
 use ndarray::Array3;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use swanky_channel::Channel;
 
 /// The accuracy of each kind of activation function.
@@ -24,8 +24,10 @@ pub struct Accuracy {
     pub(crate) max: String,
 }
 
-/// Each layer optionally contains weights and biases. If they are not present, the
-/// weights and biases will be treated as secret (garbler inputs).
+/// A layer of a [`crate::NeuralNet`].
+///
+/// Each layer optionally contains weights and biases. If they are not present,
+/// the weights and biases are treated as secret (garbler inputs).
 #[derive(Clone)]
 pub enum Layer {
     Dense {
@@ -63,6 +65,48 @@ pub enum Layer {
     },
 }
 
+impl std::fmt::Display for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Layer::Dense { .. } => write!(f, "Dense"),
+            Layer::Convolutional { .. } => write!(f, "Convolutional"),
+            Layer::MaxPooling2D { .. } => write!(f, "MaxPooling2D"),
+            Layer::Flatten { .. } => write!(f, "Flatten"),
+            Layer::Activation { .. } => write!(f, "Activation"),
+        }
+    }
+}
+
+impl std::fmt::Debug for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Layer::Dense { activation, .. } => {
+                let (x, _, _) = self.output_dims();
+                write!(f, "Dense[{}] activation={}", x, activation)
+            }
+            Layer::Convolutional {
+                kernel_shape,
+                stride,
+                filters,
+                activation,
+                ..
+            } => write!(
+                f,
+                "Conv[{}] activation={} stride={:?} kernel_shape={:?}",
+                filters.len(),
+                activation,
+                stride,
+                kernel_shape
+            ),
+            Layer::MaxPooling2D { stride, size, .. } => {
+                write!(f, "MaxPooling2D stride={:?} size={:?}", stride, size)
+            }
+            Layer::Flatten { .. } => write!(f, "Flatten"),
+            Layer::Activation { activation, .. } => write!(f, "Activation {}", activation),
+        }
+    }
+}
+
 /// NeuralNetOps encodes the particular way that we evaluate a neural net - whether it is
 /// directly over `i64` or as an arithmetic circuit, or whatever. The first argument to
 /// these functions could be a `Fancy` object.
@@ -82,53 +126,11 @@ struct NeuralNetOps<B, T> {
     max: Box<dyn Fn(&mut B, &[T], &mut Channel) -> T>,
     // Activation function chosen based on string name.
     act: Box<dyn Fn(&mut B, &str, &T, &mut Channel) -> T>,
+    // Encode a zero value.
     zero: Box<dyn Fn(&mut B, &mut Channel) -> T>,
 }
 
 impl Layer {
-    /// Get the name of the type of this Layer.
-    pub fn name(&self) -> &str {
-        match self {
-            Layer::Dense { .. } => "Dense",
-            Layer::Convolutional { .. } => "Convolutional",
-            Layer::MaxPooling2D { .. } => "MaxPooling2D",
-            Layer::Flatten { .. } => "Flatten",
-            Layer::Activation { .. } => "Activation",
-        }
-    }
-
-    /// Output info about this layer.
-    pub fn info(&self) -> String {
-        match self {
-            Layer::Dense { activation, .. } => {
-                let (x, _, _) = self.output_dims();
-                format!("Dense[{}] activation={}", x, activation)
-            }
-
-            Layer::Convolutional {
-                kernel_shape,
-                stride,
-                filters,
-                activation,
-                ..
-            } => format!(
-                "Conv[{}] activation={} stride={:?} kernel_shape={:?}",
-                filters.len(),
-                activation,
-                stride,
-                kernel_shape
-            ),
-
-            Layer::MaxPooling2D { stride, size, .. } => {
-                format!("MaxPooling2D stride={:?} size={:?}", stride, size)
-            }
-
-            Layer::Flatten { .. } => "Flatten".to_string(),
-
-            Layer::Activation { activation, .. } => format!("Activation {}", activation),
-        }
-    }
-
     /// Returns (height, width, depth).
     pub fn input_dims(&self) -> (usize, usize, usize) {
         match self {
@@ -386,11 +388,11 @@ impl Layer {
                             .zip(ws.iter())
                             .map(|(wire, weight)| {
                                 let q = wire.modulus();
-                                let tab = (0..q).map(|x| x * weight % q).collect_vec();
+                                let tab = (0..q).map(|x| x * weight % q).collect::<Vec<_>>();
                                 // project each input x to x*w
                                 b.proj(wire, q, Some(tab), channel).unwrap()
                             })
-                            .collect_vec(),
+                            .collect::<Vec<_>>(),
                     )
                 } else {
                     CrtBundle::new(
@@ -400,7 +402,7 @@ impl Layer {
                                 // project the input, without knowing the weight
                                 b.proj(wire, wire.modulus(), None, channel).unwrap()
                             })
-                            .collect_vec(),
+                            .collect::<Vec<_>>(),
                     )
                 }
             }),
@@ -736,7 +738,7 @@ impl Layer {
             }
 
             Layer::Activation { activation, .. } => {
-                let coordinates = iproduct!(0..height, 0..width, 0..depth).collect_vec();
+                let coordinates = iproduct!(0..height, 0..width, 0..depth).collect::<Vec<_>>();
                 for c in coordinates.into_iter() {
                     let z = (ops.act)(b, activation, &input[c], channel);
                     output[c] = Some(z);
@@ -746,7 +748,7 @@ impl Layer {
 
         for (coordinate, val) in output.indexed_iter() {
             if val.is_none() {
-                println!("{}: uninitialized output at {:?}", self.name(), coordinate);
+                println!("{}: uninitialized output at {:?}", self, coordinate);
                 println!("exiting...");
                 std::process::exit(1);
             }
@@ -754,7 +756,7 @@ impl Layer {
 
         output.mapv(|elem| {
             elem.unwrap_or_else(|| {
-                println!("{}: uninitialized output", self.name());
+                println!("{}: uninitialized output", self);
                 println!("exiting...");
                 std::process::exit(1);
             })

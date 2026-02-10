@@ -7,7 +7,6 @@ pub mod util;
 
 use clap::{App, Arg, ArgMatches, Error, ErrorKind, SubCommand};
 use colored::*;
-use itertools::Itertools;
 use ndarray::Array3;
 use serde_json::{self, Value};
 use swanky_channel::Channel;
@@ -172,7 +171,7 @@ pub fn main() {
     let nn = NeuralNet::from_json(model_path.to_str().unwrap(), weights_path.to_str().unwrap());
     println!("finished");
     // always print info
-    nn.print_info();
+    println!("{}", nn);
 
     let mut tests_path = dir.join(Path::new("tests.json"));
     if !tests_path.is_file() {
@@ -240,7 +239,7 @@ pub fn main() {
                 .parse::<usize>()
                 .expect("bitwidth: expected number")
         })
-        .collect_vec();
+        .collect::<Vec<_>>();
 
     // pad the end with the last value
     bitwidth.resize(nn.nlayers() + 1, *bitwidth.last().unwrap());
@@ -260,7 +259,7 @@ pub fn main() {
         bitwidth
             .iter()
             .map(|&w| fancy_garbling::util::primes_with_width(w as u32).len())
-            .collect_vec()
+            .collect::<Vec<_>>()
     );
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -316,7 +315,7 @@ fn read_tests(filename: &str, num: Option<usize>) -> Vec<Array3<i64>> {
                 .unwrap()
                 .split(",")
                 .map(|s| s.parse().expect("couldn't parse!"))
-                .collect_vec();
+                .collect::<Vec<_>>();
             Array3::from_shape_vec((data.len(), 1, 1), data).expect("couldn't create array!")
         });
 
