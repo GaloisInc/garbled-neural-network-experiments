@@ -1,5 +1,3 @@
-#![feature(atomic_min_max)]
-
 pub mod direct_tests;
 pub mod dummy_tests;
 pub mod garbling_benches;
@@ -12,6 +10,7 @@ use colored::*;
 use itertools::Itertools;
 use ndarray::Array3;
 use serde_json::{self, Value};
+use swanky_channel::Channel;
 
 use std::fs::File;
 use std::io::Write;
@@ -25,20 +24,18 @@ static VERSION: &str = "0.1.0";
 fn is_dir(s: String) -> Result<(), String> {
     let dir = Path::new(&s);
     if !dir.is_dir() {
-        return Err(String::from("The value is not a valid directory"));
+        Err(String::from("The value is not a valid directory"))
     } else {
-        return Ok(());
+        Ok(())
     }
 }
 
 fn is_positive(s: String) -> Result<(), String> {
     if s.parse::<u64>().is_ok() {
         return Ok(());
-    } else {
-        if let Ok(f) = s.parse::<f64>() {
-            if f > 0_f64 {
-                return Ok(());
-            }
+    } else if let Ok(f) = s.parse::<f64>() {
+        if f > 0_f64 {
+            return Ok(());
         }
     }
     Err(String::from("Not a positive number"))
@@ -271,7 +268,10 @@ pub fn main() {
 
     if matches.subcommand_matches("bitwidth").is_some() {
         println!("{}", "* computing bitwidth for each layer".green());
-        let nbits = nn.max_bitwidth(&tests);
+        let nbits = Channel::with(std::io::empty(), |channel| {
+            Ok(nn.max_bitwidth(&tests, channel))
+        })
+        .unwrap();
         for (layerno, nbits) in nbits.into_iter().enumerate() {
             println!("Layer {}: {} bits", layerno, nbits);
         }
@@ -289,8 +289,8 @@ pub fn main() {
             dummy_tests::arith_accuracy_test(&nn, &tests, &labels, &bitwidth, is_secret, accuracy);
         }
     } else if let Some(matches) = matches.subcommand_matches("bench") {
-        let niters = get_arg_usize(&matches, "niters");
-        let nthreads = get_arg_usize(&matches, "nthreads");
+        let niters = get_arg_usize(matches, "niters");
+        let nthreads = get_arg_usize(matches, "nthreads");
         garbling_benches::bench(
             &nn,
             &bitwidth,
@@ -331,7 +331,7 @@ fn read_tests(filename: &str, num: Option<usize>) -> Vec<Array3<i64>> {
         let iter = obj
             .as_array()
             .unwrap()
-            .into_iter()
+            .iter()
             .map(crate::util::value_to_array3);
 
         if let Some(n) = num {
@@ -360,11 +360,11 @@ fn read_labels(filename: &str) -> Vec<Vec<i64>> {
 
         obj.as_array()
             .unwrap()
-            .into_iter()
+            .iter()
             .map(|val| {
                 val.as_array()
                     .unwrap()
-                    .into_iter()
+                    .iter()
                     .map(|val| val.as_i64().unwrap())
                     .collect()
             })

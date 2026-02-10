@@ -1,42 +1,37 @@
 garbled neural net experiments
 ==============================
-This repo contains an implementation of convolutional neural networks using arithmetic
-garbled circuits, via [fancy-garbling](https://github.com/GaloisInc/swanky). 
-It contains the models we ran our experiments on in our paper, [Garbled Neural Networks
-Are Practical](https://eprint.iacr.org/2019/338).
+This repo contains an implementation of convolutional neural networks using
+arithmetic garbled circuits, via
+[fancy-garbling](https://github.com/GaloisInc/swanky). It contains the models we
+ran our experiments on in our paper, [Garbled Neural Networks Are
+Practical](https://eprint.iacr.org/2019/338).
 
-The high-level idea is that we use JSON output of `tensorflow` models to build neural
-network layers as a garbled circuit. The `Garbler` either hard codes the weights and
-biases as public values or as secret garbler input wires, depending on how the circuit is
-configured. Public weights is much, much cheaper to run.  Finally, the `Evaluator` is
-started on another thread, and the `Garbler` passes the garbled circuit incrementally
-through a channel as it is created. The `Evaluator` evaluates it using the test input - in
-our examples this is always an image.
+The high-level idea is that we use JSON output of `tensorflow` models to build
+neural network layers as a garbled circuit. The `Garbler` either hard codes the
+weights and biases as public values or as secret garbler input wires, depending
+on how the circuit is configured. Public weights is much, much cheaper to run.
+Finally, the `Evaluator` is started on another thread, and the `Garbler` passes
+the garbled circuit incrementally through a channel as it is created. The
+`Evaluator` evaluates it using the test input - in our examples this is always
+an image.
 
-The `neural_nets` directory contains the trained neural networks we used in the paper. 
-To run an experiment, you simply point the binary rust program to the directory you want
-and give it a command on what kind of test you would like to run.
+The `neural_nets` directory contains the trained neural networks we used in the
+paper. To run an experiment, you simply point the binary rust program to the
+directory you want and give it a command on what kind of test you would like to
+run.
 
-Generally, the `Garbler` does not know how large to make the integers. Integers must be
-large enough to avoid overflow. But the smaller they are, the better the performance.
-Therefore, we have the `bitwidth` command to run on a particular neural network. This will
-evaluate the neural network on all the test data and return the maximum bitwith necessary
-for each layer. You can then use this information to customize the bitwith for each layer
-when using other commands (using the `-w` argument).
-
-If you aren't familiar with rust, the getting started page is
-[here](https://www.rust-lang.org/learn/get-started).
-
-*Note on requirements*: 
-This project uses nightly `rustc` due to use of atomic operations.
-We recommend using [rustup](https://rustup.rs/) to configure nightly rust.
-Fancy Garbling also requires AESNI, so requires a processor that supports that
-instruction.
+Generally, the `Garbler` does not know how large to make the integers. Integers
+must be large enough to avoid overflow. But the smaller they are, the better the
+performance. Therefore, we have the `bitwidth` command to run on a particular
+neural network. This will evaluate the neural network on all the test data and
+return the maximum bitwidth necessary for each layer. You can then use this
+information to customize the bitwidth for each layer when using other commands
+(using the `-w` argument).
 
 usage
 -----
 ```
-cargo run --relase -- [FLAGS] [OPTIONS] <DIR> [SUBCOMMAND]
+cargo run --release -- [FLAGS] [OPTIONS] <DIR> [SUBCOMMAND]
 
 FLAGS:
     -b, --boolean    runs in boolean mode

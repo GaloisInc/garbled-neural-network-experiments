@@ -6,15 +6,15 @@
 //! minimizing NN evaluation bugs.
 
 use crate::util;
-use fancy_garbling::util as numbers;
+use fancy_garbling::{util as numbers, FancyArithmetic};
 use fancy_garbling::{
-    BinaryBundle, BinaryGadgets, BundleGadgets, CrtBundle, CrtGadgets, Fancy, FancyInput,
-    HasModulus,
+    BinaryBundle, BinaryGadgets, CrtBundle, CrtGadgets, Fancy, FancyInput, HasModulus,
 };
 use itertools::{iproduct, Itertools};
 use ndarray::Array3;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use swanky_channel::Channel;
 
 /// The accuracy of each kind of activation function.
 #[derive(Clone, Debug)]
@@ -66,22 +66,23 @@ pub enum Layer {
 /// NeuralNetOps encodes the particular way that we evaluate a neural net - whether it is
 /// directly over `i64` or as an arithmetic circuit, or whatever. The first argument to
 /// these functions could be a `Fancy` object.
+#[allow(clippy::type_complexity)]
 struct NeuralNetOps<B, T> {
     // Encode a constant.
-    enc: Box<dyn Fn(&mut B, i64) -> T>,
+    enc: Box<dyn Fn(&mut B, i64, &mut Channel) -> T>,
     // Encode a secret.
-    sec: Box<dyn Fn(&mut B, Option<i64>) -> T>,
+    sec: Box<dyn Fn(&mut B, Option<i64>, &mut Channel) -> T>,
     // Add two values.
-    add: Box<dyn Fn(&mut B, &T, &T) -> T>,
+    add: Box<dyn Fn(&mut B, &T, &T, &mut Channel) -> T>,
     // Scalar multiplication.
-    cmul: Box<dyn Fn(&mut B, &T, i64) -> T>,
+    cmul: Box<dyn Fn(&mut B, &T, i64, &mut Channel) -> T>,
     // Apply secret weight to an input.
-    proj: Box<dyn Fn(&mut B, &T, Option<i64>) -> T>,
+    proj: Box<dyn Fn(&mut B, &T, Option<i64>, &mut Channel) -> T>,
     // Maximum of a slice of encodings.
-    max: Box<dyn Fn(&mut B, &[T]) -> T>,
+    max: Box<dyn Fn(&mut B, &[T], &mut Channel) -> T>,
     // Activation function chosen based on string name.
-    act: Box<dyn Fn(&mut B, &str, &T) -> T>,
-    zero: T,
+    act: Box<dyn Fn(&mut B, &str, &T, &mut Channel) -> T>,
+    zero: Box<dyn Fn(&mut B, &mut Channel) -> T>,
 }
 
 impl Layer {
@@ -122,7 +123,7 @@ impl Layer {
                 format!("MaxPooling2D stride={:?} size={:?}", stride, size)
             }
 
-            Layer::Flatten { .. } => format!("Flatten"),
+            Layer::Flatten { .. } => "Flatten".to_string(),
 
             Layer::Activation { activation, .. } => format!("Activation {}", activation),
         }
@@ -207,21 +208,26 @@ impl Layer {
     }
 
     /// Evaluate this layer in plaintext while finding the max value on a wire.
-    pub fn max_bitwidth(&self, input: &Array3<i64>, _: usize) -> (Array3<i64>, i64) {
+    pub fn max_bitwidth(
+        &self,
+        input: &Array3<i64>,
+        _: usize,
+        channel: &mut Channel,
+    ) -> (Array3<i64>, i64) {
         let max_atomic: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let thread_atomic = max_atomic.clone();
         let store_max_base = Arc::new(move |x: i64| {
-            thread_atomic.fetch_max(x.abs() as usize, Ordering::SeqCst);
+            thread_atomic.fetch_max(x.unsigned_abs() as usize, Ordering::SeqCst);
         });
 
         let store_max = store_max_base.clone();
-        let enc = move |_: &mut usize, x: i64| {
+        let enc = move |_: &mut usize, x: i64, _: &mut Channel| {
             store_max(x);
             x
         };
 
         let store_max = store_max_base.clone();
-        let proj = move |_: &mut usize, inp: &i64, opt_w: Option<i64>| {
+        let proj = move |_: &mut usize, inp: &i64, opt_w: Option<i64>, _: &mut Channel| {
             if let Some(w) = opt_w {
                 let x = w * inp;
                 store_max(x);
@@ -232,21 +238,21 @@ impl Layer {
         };
 
         let store_max = store_max_base.clone();
-        let add = move |_: &mut usize, x: &i64, y: &i64| {
+        let add = move |_: &mut usize, x: &i64, y: &i64, _: &mut Channel| {
             let res = x + y;
             store_max(res);
             res
         };
 
         let store_max = store_max_base.clone();
-        let cmul = move |_: &mut usize, x: &i64, y: i64| {
+        let cmul = move |_: &mut usize, x: &i64, y: i64, _: &mut Channel| {
             let res = x * y;
             store_max(res);
             res
         };
 
         let store_max = store_max_base.clone();
-        let max = move |_: &mut usize, xs: &[i64]| {
+        let max = move |_: &mut usize, xs: &[i64], _: &mut Channel| {
             xs.iter()
                 .map(|&x| {
                     store_max(x);
@@ -256,7 +262,7 @@ impl Layer {
                 .unwrap()
         };
 
-        let act = |_: &mut usize, a: &str, x: &i64| match a {
+        let act = |_: &mut usize, a: &str, x: &i64, _: &mut Channel| match a {
             "sign" => {
                 if *x >= 0 {
                     1
@@ -271,30 +277,35 @@ impl Layer {
 
         let ops = NeuralNetOps {
             enc: Box::new(enc),
-            sec: Box::new(move |_, _| 0),
+            sec: Box::new(move |_, _, _| 0),
             add: Box::new(add),
             cmul: Box::new(cmul),
             proj: Box::new(proj),
             max: Box::new(max),
             act: Box::new(act),
-            zero: 0,
+            zero: Box::new(|_, _| 0),
         };
 
-        let layer_output = self.eval(&mut 0, input, &ops, false);
+        let layer_output = self.eval(&mut 0, input, &ops, false, channel);
         let max_val = max_atomic.load(Ordering::SeqCst) as i64;
         (layer_output, max_val)
     }
 
     /// Evaluate this layer in plaintext.
-    pub fn as_plaintext(&self, input: &Array3<i64>, _: usize) -> Array3<i64> {
+    pub fn as_plaintext(
+        &self,
+        input: &Array3<i64>,
+        _: usize,
+        channel: &mut Channel,
+    ) -> Array3<i64> {
         let ops = NeuralNetOps {
-            enc: Box::new(|_, x| x),
-            sec: Box::new(|_, _| panic!("secret not supported for plaintext eval")),
-            add: Box::new(|_, x, y| x + y),
-            cmul: Box::new(|_, x, y| x * y),
-            proj: Box::new(|_, _, _| panic!("secret not supported for plaintext eval")),
-            max: Box::new(|_, xs| *xs.iter().max().unwrap()),
-            act: Box::new(|_, a, x| match a {
+            enc: Box::new(|_, x, _| x),
+            sec: Box::new(|_, _, _| panic!("secret not supported for plaintext eval")),
+            add: Box::new(|_, x, y, _| x + y),
+            cmul: Box::new(|_, x, y, _| x * y),
+            proj: Box::new(|_, _, _, _| panic!("secret not supported for plaintext eval")),
+            max: Box::new(|_, xs, _| *xs.iter().max().unwrap()),
+            act: Box::new(|_, a, x, _| match a {
                 "sign" => {
                     if *x >= 0 {
                         1
@@ -306,13 +317,14 @@ impl Layer {
                 "id" => *x,
                 act => panic!("unsupported activation {}", act),
             }),
-            zero: 0,
+            zero: Box::new(|_, _| 0),
         };
 
-        self.eval(&mut 0, input, &ops, false)
+        self.eval(&mut 0, input, &ops, false, channel)
     }
 
     /// Perform an arithmetic fancy computation for this layer
+    #[allow(clippy::too_many_arguments)]
     pub fn as_arith<W, F>(
         &self,
         b: &mut F,
@@ -323,43 +335,48 @@ impl Layer {
         secret_weights: bool,
         secret_weights_owned: bool,
         accuracy: &Accuracy,
+        channel: &mut Channel,
     ) -> Array3<CrtBundle<W>>
     where
         W: Clone + HasModulus,
-        F: Fancy<Item = W> + FancyInput<Item = W>,
+        F: Fancy<Item = W>
+            + FancyInput<Item = W>
+            + FancyArithmetic<Item = W>
+            + CrtGadgets<Item = W>,
     {
         let relu_accuracy = accuracy.relu.clone();
         let sign_accuracy = accuracy.sign.clone();
         let max_accuracy = accuracy.max.clone();
         let output_ps = numbers::factor(output_mod);
         let ops = NeuralNetOps {
-            enc: Box::new(move |b: &mut F, x| {
-                b.crt_constant_bundle(util::to_mod_q(x, q), q).unwrap()
+            enc: Box::new(move |b: &mut F, x, channel| {
+                b.crt_constant_bundle(util::to_mod_q(x, q), q, channel)
+                    .unwrap()
             }),
 
             sec: if secret_weights_owned {
-                Box::new(move |b: &mut F, opt_x| {
-                    b.crt_encode(util::to_mod_q(opt_x.unwrap(), q), q)
-                        .ok()
+                Box::new(move |b: &mut F, opt_x, channel| {
+                    b.crt_encode(util::to_mod_q(opt_x.unwrap(), q), q, channel)
                         .expect("error encoding secret CRT value")
                 })
             } else {
-                Box::new(move |b: &mut F, _| {
-                    b.crt_receive(q)
-                        .ok()
+                Box::new(move |b: &mut F, _, channel| {
+                    b.crt_receive(q, channel)
                         .expect("error receiving secret CRT value")
                 })
             },
 
-            add: Box::new(move |b: &mut F, x: &CrtBundle<W>, y: &CrtBundle<W>| {
-                b.crt_add(x, y).unwrap()
+            add: Box::new(
+                move |b: &mut F, x: &CrtBundle<W>, y: &CrtBundle<W>, _: &mut Channel| {
+                    b.crt_add(x, y)
+                },
+            ),
+
+            cmul: Box::new(move |b: &mut F, x: &CrtBundle<W>, y, _: &mut Channel| {
+                b.crt_cmul(x, util::to_mod_q(y, q))
             }),
 
-            cmul: Box::new(move |b: &mut F, x: &CrtBundle<W>, y| {
-                b.crt_cmul(x, util::to_mod_q(y, q)).unwrap()
-            }),
-
-            proj: Box::new(move |b: &mut F, inp, opt_w| {
+            proj: Box::new(move |b: &mut F, inp, opt_w, channel| {
                 if let Some(w) = opt_w {
                     // convert the weight to crt mod q
                     let ws = util::to_mod_q_crt(w, q);
@@ -371,7 +388,7 @@ impl Layer {
                                 let q = wire.modulus();
                                 let tab = (0..q).map(|x| x * weight % q).collect_vec();
                                 // project each input x to x*w
-                                b.proj(wire, q, Some(tab)).unwrap()
+                                b.proj(wire, q, Some(tab), channel).unwrap()
                             })
                             .collect_vec(),
                     )
@@ -381,28 +398,37 @@ impl Layer {
                             .iter()
                             .map(|wire| {
                                 // project the input, without knowing the weight
-                                b.proj(wire, wire.modulus(), None).unwrap()
+                                b.proj(wire, wire.modulus(), None, channel).unwrap()
                             })
                             .collect_vec(),
                     )
                 }
             }),
-            max: Box::new(move |b: &mut F, xs: &[CrtBundle<W>]| {
-                b.crt_max(xs, &max_accuracy).unwrap()
+            max: Box::new(move |b: &mut F, xs: &[CrtBundle<W>], channel| {
+                b.crt_max(xs, &max_accuracy, channel).unwrap()
             }),
-            act: Box::new(move |b: &mut F, a: &str, x: &CrtBundle<W>| match a {
-                "sign" => b.crt_sgn(x, &sign_accuracy, Some(&output_ps)).unwrap(),
-                "relu" => b.crt_relu(x, &relu_accuracy, Some(&output_ps)).unwrap(),
-                "id" => x.clone(),
-                act => panic!("unsupported activation {}", act),
+            act: Box::new(
+                move |b: &mut F, a: &str, x: &CrtBundle<W>, channel| match a {
+                    "sign" => b
+                        .crt_sgn(x, &sign_accuracy, Some(&output_ps), channel)
+                        .unwrap(),
+                    "relu" => b
+                        .crt_relu(x, &relu_accuracy, Some(&output_ps), channel)
+                        .unwrap(),
+                    "id" => x.clone(),
+                    act => panic!("unsupported activation {}", act),
+                },
+            ),
+            zero: Box::new(move |b: &mut F, channel: &mut Channel| {
+                b.crt_constant_bundle(0, q, channel).unwrap()
             }),
-            zero: b.crt_constant_bundle(0, q).unwrap(),
         };
 
-        self.eval(b, &input, &ops, secret_weights)
+        self.eval(b, input, &ops, secret_weights, channel)
     }
 
     /// Perform a binary fancy computation for this layer
+    #[allow(clippy::too_many_arguments)]
     pub fn as_binary<W, F>(
         &self,
         b: &mut F,
@@ -412,74 +438,87 @@ impl Layer {
         _: usize,
         secret_weights: bool,
         secret_weights_owned: bool,
+        channel: &mut Channel,
     ) -> Array3<BinaryBundle<W>>
     where
         W: Clone + HasModulus,
-        F: Fancy<Item = W> + FancyInput<Item = W>,
+        F: Fancy<Item = W> + FancyInput<Item = W> + BinaryGadgets<Item = W>,
     {
         let ops = NeuralNetOps {
-            enc: Box::new(move |b: &mut F, x| {
+            enc: Box::new(move |b: &mut F, x, channel: &mut Channel| {
                 let twos = util::i64_to_twos_complement(x, nbits);
-                b.bin_constant_bundle(twos, nbits).unwrap()
+                b.bin_constant_bundle(twos, nbits, channel).unwrap()
             }),
 
-            sec: Box::new(move |b: &mut F, opt_x| {
+            sec: Box::new(move |b: &mut F, opt_x, channel: &mut Channel| {
                 if secret_weights_owned {
                     let xbits = util::i64_to_twos_complement(opt_x.unwrap(), nbits);
-                    b.bin_encode(xbits, nbits)
-                        .ok()
+                    b.bin_encode(xbits, nbits, channel)
                         .expect("error encoding binary secret value")
                 } else {
-                    b.bin_receive(nbits)
-                        .ok()
+                    b.bin_receive(nbits, channel)
                         .expect("error receiving binary secret value")
                 }
             }),
 
-            add: Box::new(move |b: &mut F, x: &BinaryBundle<W>, y: &BinaryBundle<W>| {
-                b.bin_addition_no_carry(x, y).unwrap()
-            }),
+            add: Box::new(
+                move |b: &mut F,
+                      x: &BinaryBundle<W>,
+                      y: &BinaryBundle<W>,
+                      channel: &mut Channel| {
+                    b.bin_addition_no_carry(x, y, channel).unwrap()
+                },
+            ),
 
-            cmul: Box::new(move |b: &mut F, x: &BinaryBundle<W>, y| {
-                b.bin_cmul(x, util::i64_to_twos_complement(y, nbits), nbits)
-                    .unwrap()
-            }),
+            cmul: Box::new(
+                move |b: &mut F, x: &BinaryBundle<W>, y, channel: &mut Channel| {
+                    b.bin_cmul(x, util::i64_to_twos_complement(y, nbits), nbits, channel)
+                        .unwrap()
+                },
+            ),
 
-            proj: Box::new(move |b: &mut F, inp, opt_w| {
+            proj: Box::new(move |b: &mut F, inp, opt_w, channel: &mut Channel| {
                 // ignore the input weight - it needs to be a garbler input
                 let weight_bits = opt_w.map(|w| util::i64_to_twos_complement(w, nbits));
                 let w = if secret_weights_owned {
-                    b.bin_encode(weight_bits.unwrap(), nbits)
-                        .ok()
+                    b.bin_encode(weight_bits.unwrap(), nbits, channel)
                         .expect("could not encode binary secret")
                 } else {
-                    b.bin_receive(nbits)
-                        .ok()
+                    b.bin_receive(nbits, channel)
                         .expect("could not receive binary secret")
                 };
-                b.bin_multiplication_lower_half(inp, &w).unwrap()
+                b.bin_multiplication_lower_half(inp, &w, channel).unwrap()
             }),
 
-            max: Box::new(move |b: &mut F, xs: &[BinaryBundle<W>]| b.bin_max(xs).unwrap()),
+            max: Box::new(
+                move |b: &mut F, xs: &[BinaryBundle<W>], channel: &mut Channel| {
+                    b.bin_max(xs, channel).unwrap()
+                },
+            ),
 
-            act: Box::new(move |b: &mut F, a: &str, x: &BinaryBundle<W>| match a {
-                "sign" => {
-                    let sign = x.wires().last().unwrap();
-                    let neg1 = (1 << nbits) - 1;
-                    b.bin_multiplex_constant_bits(sign, 1, neg1, nbits).unwrap()
-                }
-                "relu" => {
-                    let sign = x.wires().last().unwrap();
-                    let zeros = b.bin_constant_bundle(0u128, nbits).unwrap();
-                    BinaryBundle::from(b.multiplex(&sign, &x, &zeros).unwrap())
-                }
-                "id" => x.clone(),
-                act => panic!("unsupported activation {}", act),
+            act: Box::new(
+                move |b: &mut F, a: &str, x: &BinaryBundle<W>, channel: &mut Channel| match a {
+                    "sign" => {
+                        let sign = x.wires().last().unwrap();
+                        let neg1 = (1 << nbits) - 1;
+                        b.bin_multiplex_constant_bits(sign, 1, neg1, nbits, channel)
+                            .unwrap()
+                    }
+                    "relu" => {
+                        let sign = x.wires().last().unwrap();
+                        let zeros = b.bin_constant_bundle(0u128, nbits, channel).unwrap();
+                        b.bin_multiplex(sign, x, &zeros, channel).unwrap()
+                    }
+                    "id" => x.clone(),
+                    act => panic!("unsupported activation {}", act),
+                },
+            ),
+
+            zero: Box::new(move |b: &mut F, channel: &mut Channel| {
+                b.bin_constant_bundle(0u128, nbits, channel).unwrap()
             }),
-
-            zero: b.bin_constant_bundle(0u128, nbits).unwrap(),
         };
-        self.eval(b, &input, &ops, secret_weights)
+        self.eval(b, input, &ops, secret_weights, channel)
     }
 
     /// Polymorphic evaluation so we can run on `i64` directly as well as use this
@@ -490,6 +529,7 @@ impl Layer {
         input: &Array3<T>,
         ops: &NeuralNetOps<B, T>,
         secret_weights: bool,
+        channel: &mut Channel,
     ) -> Array3<T>
     where
         T: Clone,
@@ -508,28 +548,37 @@ impl Layer {
             } => {
                 for neuron in 0..nouts {
                     let mut x = if secret_weights {
-                        (ops.sec)(b, biases[neuron])
+                        (ops.sec)(b, biases[neuron], channel)
                     } else {
-                        (ops.enc)(b, biases[neuron].expect("biases required for evaluation"))
+                        (ops.enc)(
+                            b,
+                            biases[neuron].expect("biases required for evaluation"),
+                            channel,
+                        )
                     };
 
                     for i in 0..height {
                         for j in 0..width {
                             for k in 0..depth {
                                 let prod = if secret_weights {
-                                    (ops.proj)(b, &input[(i, j, k)], weights[neuron][(i, j, k)])
+                                    (ops.proj)(
+                                        b,
+                                        &input[(i, j, k)],
+                                        weights[neuron][(i, j, k)],
+                                        channel,
+                                    )
                                 } else {
                                     let w = weights[neuron][(i, j, k)].expect(
                                         "Dense layer eval: weights required for evaluation",
                                     );
-                                    (ops.cmul)(b, &input[(i, j, k)], w)
+                                    (ops.cmul)(b, &input[(i, j, k)], w, channel)
                                 };
-                                x = (ops.add)(b, &x, &prod);
+                                x = (ops.add)(b, &x, &prod, channel);
                             }
                         }
                     }
 
-                    let z = (ops.act)(b, activation, &x);
+                    let z = (ops.act)(b, activation, &x, channel);
                     output[(neuron, 0, 0)] = Some(z);
                 }
             }
@@ -570,9 +619,9 @@ impl Layer {
                             // && w < owidth {
 
                             let mut x = if secret_weights {
-                                (ops.sec)(b, biases[filterno])
+                                (ops.sec)(b, biases[filterno], channel)
                             } else {
-                                (ops.enc)(b, biases[filterno].expect("no bias"))
+                                (ops.enc)(b, biases[filterno].expect("no bias"), channel)
                             };
 
                             for i in 0..kheight {
@@ -586,26 +635,32 @@ impl Layer {
                                                     || idx_x >= width + shift_x));
 
                                         let input_val = if pad_condition {
-                                            &(ops.zero)
+                                            &(ops.zero)(b, channel)
                                         } else {
                                             &input[(idx_y - shift_y, idx_x - shift_x, k)]
                                         };
 
                                         let prod = if secret_weights {
-                                            (ops.proj)(b, &input_val, filters[filterno][(i, j, k)])
+                                            (ops.proj)(
+                                                b,
+                                                input_val,
+                                                filters[filterno][(i, j, k)],
+                                                channel,
+                                            )
                                         } else {
                                             (ops.cmul)(
                                                 b,
-                                                &input_val,
+                                                input_val,
                                                 filters[filterno][(i, j, k)].expect("no weight"),
+                                                channel,
                                             )
                                         };
-                                        x = (ops.add)(b, &x, &prod);
+                                        x = (ops.add)(b, &x, &prod, channel);
                                     }
                                 }
                             }
 
-                            let z = (ops.act)(b, activation, &x);
+                            let z = (ops.act)(b, activation, &x, channel);
                             assert!(output[(h, w, filterno)].is_none());
                             output[(h, w, filterno)] = Some(z);
                             w += 1;
@@ -654,7 +709,7 @@ impl Layer {
                                                 || idx_x >= width + shift_x));
 
                                     let val = if pad_condition {
-                                        (ops.zero).clone()
+                                        (ops.zero)(b, channel).clone()
                                     } else {
                                         input[(idx_y - shift_y, idx_x - shift_x, z)].clone()
                                     };
@@ -670,7 +725,7 @@ impl Layer {
                 }
 
                 for (coordinate, window) in windows.into_iter() {
-                    let val = (ops.max)(b, &window);
+                    let val = (ops.max)(b, &window, channel);
                     output[coordinate] = Some(val);
                 }
             }
@@ -683,7 +738,7 @@ impl Layer {
             Layer::Activation { activation, .. } => {
                 let coordinates = iproduct!(0..height, 0..width, 0..depth).collect_vec();
                 for c in coordinates.into_iter() {
-                    let z = (ops.act)(b, activation, &input[c]);
+                    let z = (ops.act)(b, activation, &input[c], channel);
                     output[c] = Some(z);
                 }
             }

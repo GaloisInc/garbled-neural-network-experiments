@@ -4,6 +4,7 @@ use fancy_garbling::util as numbers;
 use fancy_garbling::FancyInput;
 use itertools::Itertools;
 use ndarray::Array3;
+use swanky_channel::Channel;
 
 use crate::layer::Accuracy;
 use crate::neural_net::NeuralNet;
@@ -30,7 +31,7 @@ pub fn arith_accuracy_test(
 
     let mut errors = 0;
 
-    let mut mb = pbr::MultiBar::new();
+    let mb = pbr::MultiBar::new();
     let mut p1 = mb.create_bar(images.len() as u64);
     p1.message("Test ");
     let mut p2 = mb.create_bar(nn.nlayers() as u64);
@@ -50,25 +51,34 @@ pub fn arith_accuracy_test(
             100.0 * (1.0 - errors as f32 / img_num as f32)
         ));
 
-        // create a new dummy with the image as the input
-        let mut dummy = Dummy::new();
-        let inp = img
-            .iter()
-            .map(|&x| dummy.crt_encode(util::to_mod_q(x, qfirst), qfirst).unwrap())
-            .collect_vec();
+        let (start, outs) = Channel::with(std::io::empty(), |channel| {
+            // create a new dummy with the image as the input
+            let mut dummy = Dummy::new();
+            let inp = img
+                .iter()
+                .map(|&x| {
+                    dummy
+                        .crt_encode(util::to_mod_q(x, qfirst), qfirst, channel)
+                        .unwrap()
+                })
+                .collect_vec();
 
-        // evaluate the fancy computation using the dummy
-        let start = time::PreciseTime::now();
-        let outs = nn.eval_arith(
-            &mut dummy,
-            &inp,
-            &moduli,
-            Some(&mut p2),
-            8,
-            secret_weights,
-            true,
-            accuracy,
-        );
+            // evaluate the fancy computation using the dummy
+            let start = time::PreciseTime::now();
+            let outs = nn.eval_arith(
+                &mut dummy,
+                &inp,
+                &moduli,
+                Some(&mut p2),
+                8,
+                secret_weights,
+                true,
+                accuracy,
+                channel,
+            );
+            Ok((start, outs))
+        })
+        .unwrap();
         let end = time::PreciseTime::now();
         total_time = total_time + start.to(end);
 
@@ -77,7 +87,7 @@ pub fn arith_accuracy_test(
             .iter()
             .map(|out| {
                 let vals = &out.iter().map(|v| v.val()).collect_vec();
-                util::from_mod_q_crt(&vals, qlast)
+                util::from_mod_q_crt(vals, qlast)
             })
             .collect_vec();
 
@@ -114,7 +124,7 @@ pub fn boolean_accuracy_test(
 
     let first_layer_nbits = *bitwidth.first().unwrap();
 
-    let mut mb = pbr::MultiBar::new();
+    let mb = pbr::MultiBar::new();
     let mut p1 = mb.create_bar(images.len() as u64);
     p1.message("Test ");
     let mut p2 = mb.create_bar(nn.nlayers() as u64);
@@ -134,29 +144,34 @@ pub fn boolean_accuracy_test(
             100.0 * (1.0 - errors as f32 / img_num as f32)
         ));
 
-        // create a new dummy with the image as the input
-        let mut dummy = Dummy::new();
+        let (start, outs) = Channel::with(std::io::empty(), |channel| {
+            // create a new dummy with the image as the input
+            let mut dummy = Dummy::new();
 
-        // encode the image in twos complement
-        let inp = img
-            .iter()
-            .map(|&x| {
-                let bits = util::i64_to_twos_complement(x, first_layer_nbits);
-                dummy.bin_encode(bits, first_layer_nbits).unwrap()
-            })
-            .collect_vec();
+            // encode the image in twos complement
+            let inp = img
+                .iter()
+                .map(|&x| {
+                    let bits = util::i64_to_twos_complement(x, first_layer_nbits);
+                    dummy.bin_encode(bits, first_layer_nbits, channel).unwrap()
+                })
+                .collect_vec();
 
-        // evaluate the fancy computation using the dummy
-        let start = time::PreciseTime::now();
-        let outs = nn.eval_boolean(
-            &mut dummy,
-            &inp,
-            bitwidth,
-            Some(&mut p2),
-            8,
-            secret_weights,
-            true,
-        );
+            // evaluate the fancy computation using the dummy
+            let start = time::PreciseTime::now();
+            let outs = nn.eval_boolean(
+                &mut dummy,
+                &inp,
+                bitwidth,
+                Some(&mut p2),
+                8,
+                secret_weights,
+                true,
+                channel,
+            );
+            Ok((start, outs))
+        })
+        .unwrap();
         let end = time::PreciseTime::now();
         total_time = total_time + start.to(end);
 
@@ -165,7 +180,7 @@ pub fn boolean_accuracy_test(
             .iter()
             .map(|out| {
                 let vals = &out.iter().map(|v| v.val()).collect_vec();
-                util::i64_from_bits(&vals)
+                util::i64_from_bits(vals)
             })
             .collect_vec();
 

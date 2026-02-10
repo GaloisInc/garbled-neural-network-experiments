@@ -7,7 +7,7 @@ use std::io::prelude::*;
 use std::io::{BufReader, Lines};
 
 pub fn index_of_max(xs: &[i64]) -> usize {
-    let mut max_val = i64::min_value();
+    let mut max_val = i64::MIN;
     let mut max_ix = 0;
     for (i, &x) in xs.iter().enumerate() {
         if x > max_val {
@@ -86,17 +86,17 @@ pub fn value_to_array3(v: &Value) -> Array3<i64> {
     let rows = v.as_array().expect("value is not an array!");
 
     let data = rows
-        .into_iter()
+        .iter()
         .map(|cols| {
             if cols.is_array() {
                 cols.as_array()
                     .unwrap()
-                    .into_iter()
+                    .iter()
                     .map(|deps| {
                         if deps.is_array() {
                             deps.as_array()
                                 .expect("expected colors!")
-                                .into_iter()
+                                .iter()
                                 .map(|val| val.as_i64().expect("expected a number!"))
                                 .collect_vec()
                         } else {
@@ -142,7 +142,7 @@ pub fn encode_binary(input: impl Iterator<Item = i64>, nbits: usize) -> Vec<u16>
 
 /// Decode the output array from bits.
 pub fn decode_binary(output: &[u16], nbits: usize) -> Vec<i64> {
-    output.chunks(nbits).map(|xs| i64_from_bits(xs)).collect()
+    output.chunks(nbits).map(i64_from_bits).collect()
 }
 
 #[cfg(test)]

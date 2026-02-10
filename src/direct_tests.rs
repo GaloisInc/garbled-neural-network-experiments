@@ -1,6 +1,6 @@
 use colored::*;
-use ndarray::Array3;
 use itertools::Itertools;
+use ndarray::Array3;
 
 use crate::neural_net::NeuralNet;
 use crate::util;
